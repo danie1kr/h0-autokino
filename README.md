@@ -18,7 +18,7 @@ Best option to hide a display is a drive in cinema. This project is the cinema p
 * For standalone:
   * USB-C male breakout
   * 5V power source
-  * Some stands, see [floor](res/Autokino - Floor.dxf) and [side](res/Autokino - Side x2.dxf) DXF files as an example.
+  * Some stands, see [floor](res/Autokino-Floor.dxf) and [side](res/Autokino-Side-x2.dxf) DXF files as an example.
 
 # Usage
 Run ffmpeg.ps1, put the files on the SD card and the SD card into the board and power it up.
