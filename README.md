@@ -2,7 +2,7 @@
 With [winston](https://github.com/danie1kr/winston), I also want to have a display on my model rail road.
 Best option to hide a display is a drive in cinema. This project is the cinema part. Feel free to adapt it to your model rail road as well.
 
-![H0 Autokino](./res/image.jpg)
+![H0 Autokino](./res/image.jpg?raw=true)
 
 # Requirements
 * Board:
