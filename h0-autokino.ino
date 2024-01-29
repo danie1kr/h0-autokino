@@ -10,6 +10,17 @@ By danie1kr, 2024
 
 //#define WITH_SERIAL
 
+#define BENCHMARK
+#ifdef BENCHMARK
+#define WITH_SERIAL
+//#define BENCHMARK_ZIP
+//#define BENCHMARK_MJPEG
+// Balu 1150 frames in 58954 ms:  51.2643 ms/frame =  19.5067 frames/s, longest frame: 72
+//#define BENCHMARK_JPEG
+// Balu 1151 frames in 69513 ms:  60.3936 ms/frame =  16.5581 frames/s, longest frame: 72
+#define BENCHMARK_PACK
+
+#endif
 #define SPI_DRIVER_SELECT 0
 #define LGFX_USE_V1
 
@@ -31,11 +42,62 @@ const unsigned int screenHeight = 320;
 #include <JPEGDEC.h>
 static JPEGDEC jpeg;
 File globalFile; // loading image
-size_t largestJPEGFileSize = 0;
-uint8_t* jpegBuffer;
+uint32_t largestJPEGFileSize = 0;
+uint8_t* jpegBuffer = nullptr;
 
 // for movies file
 #include <ArduinoJson.h>
+
+
+#ifdef BENCHMARK_MJPEG
+//#include "MjpegClass.h"
+
+class MjpegClass
+{
+public:
+  bool setup(
+      File *file, uint8_t *buffer, const size_t bufferSize, JPEGDEC *jpeg, JPEG_DRAW_CALLBACK *pfnDraw, bool useBigEndian,
+      int x, int y)
+  {
+
+  }
+
+  bool loadNextFrame()
+  {
+
+  }
+
+  bool drawFrame()
+  {
+    this->jpeg->openRAM(buffer, frameSize, this->jpegDraw);
+
+    if (this->useBigEndian)
+    {
+      this->jpeg->setPixelType(RGB565_BIG_ENDIAN);
+    }
+    this->jpeg->decode(this->x, this->y, 0);
+    this->jpeg->close();
+
+    return true;
+  }
+private:
+  int x, y;
+  bool useBigEndian;
+  File *file;
+  uint8_t *buffer;
+  const size_t bufferSize;
+  JPEGDEC *jpeg;
+  JPEG_DRAW_CALLBACK *jpegDraw;
+
+  size_t frameSize;
+}
+
+#endif
+
+#ifdef BENCHMARK_ZIP
+#include <unzipLIB.h>
+UNZIP zip;
+#endif
 
 // PIN configuration
 #define SPI_MOSI 2
@@ -193,6 +255,135 @@ struct Movie
 };
 std::vector<Movie> movies;
 
+#ifdef BENCHMARK_PACK
+
+std::string frameToFilename(unsigned int frame)
+{
+  // ffmpeg created files with setting %04d.jpg
+  std::string name;
+  if (frame < 1000)
+    name += "0";
+  if (frame < 100)
+    name += "0";
+  if (frame < 10)
+    name += "0";
+  name += std::to_string(frame);
+  name += ".jpg";
+  return name;
+}
+
+File packFile;
+void pack(Movie *movie, std::string targetFileName)
+{
+  if(SD.exists(targetFileName.c_str()))
+  {
+    SD.remove(targetFileName.c_str());
+  }
+
+  auto currentFrame = movieFrameStart;
+  File target = SD.open(targetFileName.c_str(), O_RDWR | O_CREAT);
+
+  lcd.setCursor(0, 20);
+  lcd.print("Getting sizes");
+  for(currentFrame = movieFrameStart; currentFrame < movie->frames; ++currentFrame)
+  {
+    std::string jpegFileName = movie->path + "/" + frameToFilename(currentFrame);
+    File f = SD.open(jpegFileName.c_str());
+    if (f) 
+    {
+      uint32_t size = f.size();
+      if(size < largestJPEGFileSize)
+        largestJPEGFileSize = size;
+      f.close();
+    }
+  }
+  Serial.printf("largest file: %dkb\n", largestJPEGFileSize);
+  lcd.setCursor(0, 32);
+  lcd.print("Packing");
+
+  uint32_t bufferSize = 32*1024;
+  uint8_t *buffer = (uint8_t*)malloc(bufferSize);
+
+  target.write(&largestJPEGFileSize, sizeof(largestJPEGFileSize));
+  uint32_t overallSize = sizeof(uint32_t) * (movie->frames + 1); 
+  for(currentFrame = movieFrameStart; currentFrame <= movie->frames; ++currentFrame)
+  {
+    std::string jpegFileName = movie->path + "/" + frameToFilename(currentFrame);
+    File f = SD.open(jpegFileName.c_str());
+    if (f)
+    {
+      uint32_t size = f.size();
+      target.write(&size, sizeof(size));
+
+      uint32_t read = 0;
+      uint32_t left = size;
+      while(read < size)
+      {
+        uint32_t toRead = min(left, bufferSize);
+        f.read(buffer, toRead);
+        target.write(buffer, toRead);
+        read += toRead;
+        if(toRead > left)
+        {
+          Serial.printf("issue with toRead %d and left %d", toRead, left);
+          while(1);
+        }
+        left -= toRead;
+        // Serial.printf("Packing %d total: %d read: %d left: %d transfer: %d\n", currentFrame, size, read, left, toRead);
+      }
+      overallSize += size;
+      f.close();
+    }
+    lcd.setCursor(0, 44);
+    lcd.print(jpegFileName.c_str());
+  }
+  free(buffer);
+  Serial.printf("File %s size on disk %d content %d", targetFileName.c_str(), target.size(), overallSize);
+  target.close();
+  lcd.setCursor(0, 56);
+  lcd.print("done");
+}
+
+bool loadPacked(std::string path)
+{
+  packFile = SD.open(path.c_str());
+  if(!packFile)
+    informAndHalt("cannot open packfile");
+
+  packFile.read(&largestJPEGFileSize, sizeof(largestJPEGFileSize));
+  if(jpegBuffer)
+    free(jpegBuffer);
+
+  Serial.printf("alloc %d for jpeg buffer\n", largestJPEGFileSize);
+
+  jpegBuffer = (uint8_t*)malloc(sizeof(uint8_t) * largestJPEGFileSize);
+  if (!jpegBuffer)
+    informAndHalt("cannot alloc memory for movie frame JPEG :(");
+
+  return true;
+}
+
+bool playNextPacked()
+{
+  if(packFile.available())
+  {
+    uint32_t frameSize;
+    packFile.read(&frameSize, sizeof(frameSize));
+    packFile.read(jpegBuffer, frameSize);
+
+    jpeg.openRAM((uint8_t*)jpegBuffer, frameSize, jpegDraw);
+    jpeg.setPixelType(RGB565_BIG_ENDIAN);
+    jpeg.decode(0, 0, 0);
+    jpeg.close();
+
+    return true;
+  }
+  else
+    return false;
+}
+
+#endif
+
 // stop and display error if something bad happened
 void informAndHalt(const char* text)
 {
@@ -296,6 +487,12 @@ int32_t jpegSeek(JPEGFILE *handle, int32_t position) {
   return globalFile.seek(position);
 }
 
+#ifdef BENCHMARK
+unsigned long startBenchmark, finishBenchmark, framesBenchmark;
+unsigned int frameStart = 0, maxFrameDuration = 0;
+Movie balu("/movies/balu", 1151);
+#endif
+
 // setup
 void setup() {
     pinMode(LCD_CS, OUTPUT);
@@ -347,14 +544,19 @@ void setup() {
     if(!collectMovies(SD, "/movies"))
       informAndHalt("no movies found");
 
-#ifdef WITH_SERIAL
-    Serial.print("Alloc largestJPEGFileSize: ");
-    Serial.println(largestJPEGFileSize);
+#ifdef BENCHMARK_PACK
+    //pack(&balu, "/movies/balu.pack");
 #endif
+
+#ifndef BENCHMARK_PACK
+#ifdef WITH_SERIAL
+    Serial.printf("Alloc largestJPEGFileSize: %d\n", largestJPEGFileSize);
+#endif
+
     jpegBuffer = (uint8_t*)malloc(sizeof(uint8_t) * largestJPEGFileSize);
     if (!jpegBuffer)
       informAndHalt("cannot alloc memory for movie frame JPEG");
-
+#endif
     lcd.setCursor(0, 0);
 }
 
@@ -366,18 +568,175 @@ unsigned long lastFrame = 0;
 const unsigned long FPSdelay = 1000 / 20;
 unsigned int consecutiveTouches = 0;
 
+#ifdef BENCHMARK_JPEG
+#endif
+#ifdef BENCHMARK_MJPEG
+MjpegClass mjpeg;
+const size_t mjpegBufferSize = 20 * 1024; // we know
+uint8_t mjpegBuffer[mjpegBufferSize];
+#endif
+#ifdef BENCHMARK_ZIP
+const size_t zipBufferSize = 20 * 1024; // we know
+uint8_t zipBuffer[zipBufferSize];
+
+static File zipFile;
+// JPEG helpers for loading image
+void * zipOpen(const char *filename, int32_t *size) {
+  zipFile = SD.open(filename);
+  *size = globalFile.size();
+  return &zipFile;
+}
+
+void zipClose(void *p) {
+  ZIPFILE *pzf = (ZIPFILE *)p;
+  File *f = (File *)pzf->fHandle;
+  if (f) f->close();
+}
+
+int32_t zipRead(void *p, uint8_t *buffer, int32_t length) {
+  ZIPFILE *pzf = (ZIPFILE *)p;
+  File *f = (File *)pzf->fHandle;
+  return f->read(buffer, length);
+}
+
+int32_t zipSeek(void *p, int32_t position, int iType) {
+  ZIPFILE *pzf = (ZIPFILE *)p;
+  File *f = (File *)pzf->fHandle;
+  if (iType == SEEK_SET)
+    return f->seek(position);
+  else if (iType == SEEK_END) {
+    return f->seek(position + pzf->iSize); 
+  } else { // SEEK_CUR
+    long l = f->position();
+    return f->seek(l + position);
+  }
+}
+
+#endif
+
 unsigned int cinema()
 {
+#if defined(BENCHMARK_MJPEG)
+
+  if(!movieRunning)
+  {
+    movieFile = SD.open("/movies/balu.mjpeg");
+    mjpeg.setup(&movieFile, mjpegBuffer, jpegDraw, true, 0, 0, screenWidth, screenHeight );
+    startBenchmark = millis();
+    framesBenchmark = 0;
+  }
+ 
+  //if(mjpeg.readMjpegBuf())
+  while(movieFile.available())
+  {
+    auto frameStart = millis();
+    mjpeg.readMjpegBuf();
+    mjpeg.drawJpg();
+    ++framesBenchmark;
+    auto duration = millis() - frameStart;
+    if(duration > maxFrameDuration)
+      maxFrameDuration = duration;
+  }
+  //else
+  {
+    movieRunning = false;
+  }
+
+#elif defined(BENCHMARK_ZIP)
+  int rc;
+  if(!movieRunning)
+  {
+    rc = zip.openZIP("/movies/balu.zip", zipOpen, zipClose, zipRead, zipSeek);
+    if (rc == UNZ_OK) {
+      zip.gotoFirstFile();
+      movieRunning = true;
+    }
+    else
+    {
+      Serial.printf("cannot open zip /movies/balu.zip: %d\n", rc);
+      movieRunning = false;
+    }
+  }
+
+  if(movieRunning)
+  {
+    zip.openCurrentFile();
+    char szComment[256], szName[256];
+    unz_file_info fi;
+    rc = zip.getFileInfo(&fi, szName, sizeof(szName), NULL, 0, szComment, sizeof(szComment));
+    if(fi.uncompressed_size < zipBufferSize)
+    {
+      rc = zip.readCurrentFile(zipBuffer, fi.uncompressed_size); // we know the uncompressed size of these BMP images
+      jpeg.openRAM((uint8_t*)zipBuffer, fi.uncompressed_size, jpegDraw);
+      jpeg.setPixelType(RGB565_BIG_ENDIAN);
+      jpeg.decode(0, 0, 0);
+      jpeg.close();
+    }
+
+    rc = zip.gotoNextFile();
+    if(rc != UNZ_OK)
+    {
+      Serial.printf("no more nextfile in zip\n");
+      movieRunning = false;
+    }
+  }
+
+  if(!movieRunning)
+  {
+    zip.closeZIP();
+  }
+#elif defined(BENCHMARK_PACK)
+
+  if(!movieRunning)
+  {
+    loadPacked("/movies/balu.pack");
+    movieRunning = true;
+    startBenchmark = millis();
+    framesBenchmark = 0;
+  }
+
+  if(movieRunning)
+  {
+#ifdef BENCHMARK
+    auto frameStart = millis();
+#endif
+
+    movieRunning = playNextPacked();
+
+#ifdef BENCHMARK
+    ++framesBenchmark;
+    auto duration = millis() - frameStart;
+    if(duration > maxFrameDuration)
+      maxFrameDuration = duration;
+#endif
+  }
+
+  if(!movieRunning)
+  {
+    packFile.close();
+    Serial.printf("done after %d frames\n", framesBenchmark);
+  }
+
+#else//if defined()
     unsigned int returnDelay = 0;
     if (!movieRunning)
     {
+      #ifdef BENCHMARK
+        currentMovie = &balu;
+        startBenchmark = millis();
+        framesBenchmark = 0;
+      #else
         currentMovie = &movies[random(movies.size())];
+      #endif
         movieRunning = true;
         currentFrame = movieFrameStart;
     }
 
     if (movieRunning)
     {
+#ifdef BENCHMARK
+        auto frameStart = millis();
+#endif
         std::string jpegFileName = currentMovie->path + "/";
         // ffmpeg created files with setting %04d.jpg
         if (currentFrame < 1000)
@@ -412,14 +771,26 @@ unsigned int cinema()
             }
 
             ++currentFrame;
-
             if (currentFrame > currentMovie->frames)
+            {
+              Serial.println("last frame played");
                 movieRunning = false;
+            }
+            #ifdef BENCHMARK
+            ++framesBenchmark;
+            auto duration = millis() - frameStart;
+            if(duration > maxFrameDuration)
+              maxFrameDuration = duration;
+            #endif
         }
         else
+        {
+            Serial.printf("%s not found\n", jpegFileName.c_str());
             movieRunning = false;
+        }
     }
 
+#ifndef BENCHMARK
     uint16_t touchX, touchY;
     if (lcd.getTouch(&touchX, &touchY))
     {
@@ -433,6 +804,39 @@ unsigned int cinema()
     }
 
     return returnDelay;
+#endif
+#endif
+
+#ifdef BENCHMARK
+    if(!movieRunning)
+    {
+      Serial.println("Statistics:");
+      finishBenchmark = millis();
+      Serial.printf("%d frames in %d ms\n", framesBenchmark, finishBenchmark - startBenchmark);
+      Serial.flush();
+      
+      /*auto time = finishBenchmark - startBenchmark;
+      float msf = (float)time / (float)framesBenchmark;
+      float fps = 1.f / (msf / 1000.f);
+      Serial.printf("%d frames in %d ms: %8.4f ms/frame = %8.4f frames/s, longest frame: %d\n", framesBenchmark, time, msf, fps, maxFrameDuration);
+      Serial.flush();
+      int y = 20;
+      lcd.setCursor(20, y);
+      lcd.print(framesBenchmark);
+      lcd.setCursor(20, y += 16);
+      lcd.print(time);
+      lcd.setCursor(20, y += 16);
+      lcd.print(msf);
+      lcd.setCursor(20, y += 16);
+      lcd.print(fps);
+      lcd.setCursor(20, y += 16);
+      lcd.print(maxFrameDuration);
+      lcd.setCursor(20, y += 16);
+      lcd.print("halt");*/
+      while(1);
+    }
+  return 0;
+#endif
 }
 
 void loop() {
