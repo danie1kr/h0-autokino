@@ -8,31 +8,41 @@ By danie1kr, 2024
 #include <vector>
 #include <string>
 
-//#define WITH_SERIAL
+#include "loading.h"
 
-#define SPI_DRIVER_SELECT 0
-#define LGFX_USE_V1
+//#define BENCHMARK
+#ifdef BENCHMARK
+#define WITH_SERIAL
+//#define BENCHMARK_MJPEG
+// Balu 1150 frames in 58954 ms:  51.2643 ms/frame =  19.5067 frames/s, longest frame: 72
+//#define BENCHMARK_JPEG
+// Balu 1151 frames in 69513 ms:  60.3936 ms/frame =  16.5581 frames/s, longest frame: 72
+//#define BENCHMARK_PACK
+// Balu 1151 frames in 57657 ms:  50.0929 ms/frame = 19.9628 frames/s
+//  JPEG DEC 1.40:
+// Balu 1151 frames in 29732 ms:  25.8315ms/frame  = 38.7125 frames/s
+// Balu 1151 frames in 34067 ms:  29.5977ms/frame  = 33.7864 frames/s
+#endif
 
 // SD card interface
+#define SPI_DRIVER_SELECT 0
 #include <SPI.h>
 #include <SdFat.h>
 #define SPI_CLOCK SD_SCK_MHZ(50)
 #define SD_CONFIG SdSpiConfig(SD_CS, USER_SPI_BEGIN | DEDICATED_SPI, SPI_CLOCK)
 SdFat SD;
 
-// display and touch
-#include <LovyanGFX.hpp>
-#include <driver/i2c.h>
-#include <Wire.h>
+// lcd and touch
+#include <bb_captouch.h>
+#include <bb_spi_lcd.h>
 const unsigned int screenWidth = 480;
 const unsigned int screenHeight = 320;
 
 // display jpegs
 #include <JPEGDEC.h>
 static JPEGDEC jpeg;
-File globalFile; // loading image
-size_t largestJPEGFileSize = 0;
-uint8_t* jpegBuffer;
+uint32_t largestJPEGFileSize = 0;
+uint8_t* jpegBuffer = nullptr;
 
 // for movies file
 #include <ArduinoJson.h>
@@ -47,141 +57,8 @@ uint8_t* jpegBuffer;
 #define I2C_SCL 39
 #define I2C_SDA 38
 
-#define TOUCH_I2C_ADD 0x38
-#define TOUCH_REG_XL 0x04
-#define TOUCH_REG_XH 0x03
-#define TOUCH_REG_YL 0x06
-#define TOUCH_REG_YH 0x05
-
-// lgfx main class for Makerfabs ESP32-S3 Parallel TFT with TouchMakerfabs ESP32-S3 Parallel TFT with Touch
-class LGFX : public lgfx::LGFX_Device
-{
-    static constexpr int I2C_PORT_NUM = I2C_NUM_0;
-    static constexpr int I2C_PIN_SDA = 38;
-    static constexpr int I2C_PIN_SCL = 39;
-    static constexpr int I2C_PIN_INT = 40;
-
-    lgfx::Bus_Parallel16 _bus_instance;
-    lgfx::Panel_ILI9488 _panel_instance;
-    lgfx::Light_PWM     _light_instance;
-    lgfx::ITouch* _touch_instance_ptr = nullptr;
-
-    // Configure the touch panel
-    bool init_impl(bool use_reset, bool use_clear) override
-    {
-        if (_touch_instance_ptr == nullptr)
-        {
-            lgfx::ITouch::config_t cfg;
-            lgfx::i2c::init(I2C_PORT_NUM, I2C_PIN_SDA, I2C_PIN_SCL);
-            if (lgfx::i2c::beginTransaction(I2C_PORT_NUM, 0x38, 400000, false).has_value()
-                && lgfx::i2c::endTransaction(I2C_PORT_NUM).has_value())
-            {
-                _touch_instance_ptr = new lgfx::Touch_FT5x06();
-                cfg = _touch_instance_ptr->config();
-                cfg.i2c_addr = 0x38;
-                cfg.x_max = screenHeight;
-                cfg.y_max = screenWidth;
-            }
-            else
-                if (lgfx::i2c::beginTransaction(I2C_PORT_NUM, 0x48, 400000, false).has_value()
-                    && lgfx::i2c::endTransaction(I2C_PORT_NUM).has_value())
-                {
-                    _touch_instance_ptr = new lgfx::Touch_NS2009();
-                    cfg = _touch_instance_ptr->config();
-                    cfg.i2c_addr = 0x48;
-                    cfg.x_min = 368;
-                    cfg.y_min = 212;
-                    cfg.x_max = 3800;
-                    cfg.y_max = 3800;
-                }
-            if (_touch_instance_ptr != nullptr)
-            {
-                cfg.i2c_port = I2C_PORT_NUM;
-                cfg.pin_sda = I2C_PIN_SDA;
-                cfg.pin_scl = I2C_PIN_SCL;
-                cfg.pin_int = I2C_PIN_INT;
-                cfg.freq = 400000;
-                cfg.bus_shared = false;
-                _touch_instance_ptr->config(cfg);
-                _panel_instance.touch(_touch_instance_ptr);
-            }
-        }
-        return lgfx::LGFX_Device::init_impl(use_reset, use_clear);
-    }
-
-public:
-
-    // Configure Panel
-    LGFX(void)
-    {
-        {
-            auto cfg = _bus_instance.config();
-
-            cfg.freq_write = 40000000;
-            cfg.pin_wr = 35;
-            cfg.pin_rd = 48;
-            cfg.pin_rs = 36;
-
-            cfg.pin_d0 = 47;
-            cfg.pin_d1 = 21;
-            cfg.pin_d2 = 14;
-            cfg.pin_d3 = 13;
-            cfg.pin_d4 = 12;
-            cfg.pin_d5 = 11;
-            cfg.pin_d6 = 10;
-            cfg.pin_d7 = 9;
-            cfg.pin_d8 = 3;
-            cfg.pin_d9 = 8;
-            cfg.pin_d10 = 16;
-            cfg.pin_d11 = 15;
-            cfg.pin_d12 = 7;
-            cfg.pin_d13 = 6;
-            cfg.pin_d14 = 5;
-            cfg.pin_d15 = 4;
-            _bus_instance.config(cfg);
-            _panel_instance.bus(&_bus_instance);
-        }
-
-        {
-            auto cfg = _panel_instance.config();
-            cfg.pin_cs = -1;
-            cfg.pin_rst = -1;
-            cfg.pin_busy = -1;
-            cfg.offset_rotation = 0;
-            cfg.readable = true;
-            cfg.invert = false;
-            cfg.rgb_order = false;
-            cfg.dlen_16bit = true;
-            cfg.memory_width = screenHeight;
-            cfg.memory_height = screenWidth;
-            cfg.panel_width = screenHeight;
-            cfg.panel_height = screenWidth;
-            cfg.offset_x = 0;
-            cfg.offset_y = 0;
-            cfg.offset_rotation = 0;
-            cfg.dummy_read_pixel = 8;
-            cfg.dummy_read_bits = 1;
-            cfg.bus_shared = true;
-
-            _panel_instance.config(cfg);
-        }
-
-        {
-            auto cfg = _light_instance.config();
-
-            cfg.pin_bl = 45;
-            cfg.invert = false;
-            cfg.freq = 44100;
-            cfg.pwm_channel = 7;
-
-            _light_instance.config(cfg);
-            _panel_instance.light(&_light_instance);
-        }
-        setPanel(&_panel_instance);
-    }
-};
-
-static LGFX lcd;
+BBCapTouch touch;
+BB_SPI_LCD lcd;
 
 const unsigned int movieFrameStart = 1;
 struct Movie
@@ -193,9 +70,149 @@ struct Movie
 };
 std::vector<Movie> movies;
 
+// get Frame name
+std::string frameToFilename(unsigned int frame)
+{
+  // ffmpeg created files with setting %04d.jpg
+  std::string name;
+  if (frame < 1000)
+    name += "0";
+  if (frame < 100)
+    name += "0";
+  if (frame < 10)
+    name += "0";
+  name += std::to_string(frame);
+  name += ".jpg";
+  return name;
+}
+
+// pack Frames into one file with size prefix so we can quickly jump
+File packFile;
+void packMovieJPEGs(Movie &movie, const std::string targetFileName, const size_t chunkSize)
+{
+  if(SD.exists(targetFileName.c_str()))
+  {
+    Serial.printf("deleting %s\n", targetFileName.c_str());
+    SD.remove(targetFileName.c_str());
+  }
+
+  auto currentFrame = movieFrameStart;
+  File target = SD.open(targetFileName.c_str(), O_RDWR | O_CREAT);
+
+  lcd.setCursor(0, 20);
+  lcd.print(targetFileName.c_str());
+
+  lcd.setCursor(0, 32);
+  lcd.print("Getting sizes");
+  uint32_t largestFrameOfMovie = 0;
+  for(currentFrame = movieFrameStart; currentFrame < movie.frames; ++currentFrame)
+  {
+    std::string jpegFileName = movie.path + "/" + frameToFilename(currentFrame);
+    File f = SD.open(jpegFileName.c_str());
+    if (f) 
+    {
+      uint32_t size = f.size();
+      if(size < largestFrameOfMovie)
+        largestFrameOfMovie = size;
+      f.close();
+    }
+  }
+  Serial.printf("largest file: %dkb\n", largestFrameOfMovie);
+  lcd.setCursor(0, 44);
+  lcd.print("Packing");
+
+  uint32_t bufferSize = chunkSize;
+  uint8_t *buffer = (uint8_t*)malloc(bufferSize);
+
+  target.write(&largestFrameOfMovie, sizeof(largestFrameOfMovie));
+  uint32_t overallSize = sizeof(uint32_t) * (movie.frames + 1); 
+  for(currentFrame = movieFrameStart; currentFrame <= movie.frames; ++currentFrame)
+  {
+    std::string jpegFileName = movie.path + "/" + frameToFilename(currentFrame);
+    File f = SD.open(jpegFileName.c_str());
+    if (f)
+    {
+      uint32_t size = f.size();
+      target.write(&size, sizeof(size));
+
+      uint32_t read = 0;
+      uint32_t left = size;
+      while(read < size)
+      {
+        uint32_t toRead = min(left, bufferSize);
+        f.read(buffer, toRead);
+        target.write(buffer, toRead);
+        read += toRead;
+        if(toRead > left)
+        {
+          informAndHalt("issue with toRead left when packing a movie");
+        }
+        left -= toRead;
+      }
+      overallSize += size;
+      f.close();
+    }
+    lcd.setCursor(0, 56);
+    lcd.print(jpegFileName.c_str());
+  }
+  free(buffer);
+  Serial.printf("File %s size on disk %d content %d", targetFileName.c_str(), target.size(), overallSize);
+  target.close();
+  lcd.setCursor(0, 68);
+  lcd.print("done");
+}
+
+// load a packed file
+bool packLoad(std::string path)
+{
+  packFile = SD.open(path.c_str());
+  if(!packFile)
+    informAndHalt("cannot open packfile");
+
+  uint32_t largestFrameOfMovie;
+  packFile.read(&largestFrameOfMovie, sizeof(largestFrameOfMovie));
+
+  if(largestFrameOfMovie > largestJPEGFileSize)
+  {
+    largestJPEGFileSize = largestFrameOfMovie;
+    if(jpegBuffer)
+      free(jpegBuffer);
+
+    Serial.printf("realloc %d for jpeg buffer\n", largestJPEGFileSize);
+
+    jpegBuffer = (uint8_t*)malloc(sizeof(uint8_t) * largestJPEGFileSize);
+    if (!jpegBuffer)
+      informAndHalt("cannot alloc memory for movie frame JPEG :(");
+  }
+
+  return true;
+}
+
+// play next frame if avialable
+bool packPlayNextFrame()
+{
+  if(packFile.available())
+  {
+    uint32_t frameSize;
+    packFile.read(&frameSize, sizeof(frameSize));
+    packFile.read(jpegBuffer, frameSize);
+
+    jpeg.openRAM((uint8_t*)jpegBuffer, frameSize, jpegDraw);
+    jpeg.setPixelType(RGB565_BIG_ENDIAN);
+    jpeg.decode(0, 0, 0);
+    jpeg.close();
+
+    return true;
+  }
+  else
+    return false;
+}
+
 // stop and display error if something bad happened
 void informAndHalt(const char* text)
 {
+  Serial.printf("Halt due to: %s\n", text);
+  Serial.flush();
   lcd.setCursor(20, 20);
   lcd.print("Halt due to error:");
   lcd.setCursor(20, 42);
@@ -271,29 +288,17 @@ bool collectMovies(SdFat& fs, const char* dirname)
 // draw JPEG portion to screen
 int jpegDraw(JPEGDRAW* pDraw)
 {
-    lcd.pushImage(pDraw->x, pDraw->y, pDraw->iWidth, pDraw->iHeight, pDraw->pPixels);
+    lcd.pushImage(pDraw->x, pDraw->y, pDraw->iWidth, pDraw->iHeight, pDraw->pPixels, DRAW_TO_LCD);
     return 1;
 }
 
-// JPEG helpers for loading image
-void * jpegOpen(const char *filename, int32_t *size) {
-  globalFile = SD.open(filename);
-  *size = globalFile.size();
-  return &globalFile;
-}
-
-void jpegClose(void *handle) {
-  if (globalFile) globalFile.close();
-}
-
-int32_t jpegRead(JPEGFILE *handle, uint8_t *buffer, int32_t length) {
-  if (!globalFile) return 0;
-  return globalFile.read(buffer, length);
-}
-
-int32_t jpegSeek(JPEGFILE *handle, int32_t position) {
-  if (!globalFile) return 0;
-  return globalFile.seek(position);
+// display loading image when waiting
+void displayLoadingScreen()
+{
+  jpeg.openFLASH((uint8_t *)loading, sizeof(loading), jpegDraw);
+  jpeg.setPixelType(RGB565_BIG_ENDIAN);
+  jpeg.decode(0, 0, 0);
+  jpeg.close();
 }
 
 // setup
@@ -311,8 +316,9 @@ void setup() {
     Serial.flush();
 #endif
 
-    lcd.init();
+    lcd.begin(DISPLAY_MAKERFABS_S3);
     lcd.setRotation(3);
+    displayLoadingScreen();
 
     SPI.begin(SPI_SCK, SPI_MISO, SPI_MOSI);
     if (!SD.begin(SD_CONFIG))
@@ -321,18 +327,9 @@ void setup() {
         SD.initErrorHalt(&Serial);
     }
 
-    const char loadingScreenJPEG[] = "/loading.jpg";
-    if(SD.exists(loadingScreenJPEG))
-    {
-      jpeg.open(loadingScreenJPEG, jpegOpen, jpegClose, jpegRead, jpegSeek, jpegDraw);
-      jpeg.setPixelType(RGB565_BIG_ENDIAN);
-      jpeg.decode(0, 0, 0);
-      jpeg.close();
-    }
-    Wire.begin(I2C_SDA, I2C_SCL);
-    byte error;
-    Wire.beginTransmission(TOUCH_I2C_ADD);
-    error = Wire.endTransmission();
+    constexpr int I2C_PIN_SDA = 38;
+    constexpr int I2C_PIN_SCL = 39;
+    int error = touch.init(I2C_PIN_SDA, I2C_PIN_SCL);
 
     lcd.setCursor(0, 48);
     if (error != 0)
@@ -347,6 +344,16 @@ void setup() {
     if(!collectMovies(SD, "/movies"))
       informAndHalt("no movies found");
 
+    for(auto &movie : movies)
+    {
+      std::string packedFileName = movie.path + ".pack";
+      if(!SD.exists(packedFileName.c_str()))
+      {
+        packMovieJPEGs(movie, packedFileName, 32*1024);
+        displayLoadingScreen();
+      }
+    }
+
 #ifdef WITH_SERIAL
     Serial.print("Alloc largestJPEGFileSize: ");
     Serial.println(largestJPEGFileSize);
@@ -359,69 +366,62 @@ void setup() {
 }
 
 bool movieRunning = false;
-Movie* currentMovie;
-File movieFile;
-unsigned int currentFrame = movieFrameStart;
-unsigned long lastFrame = 0;
+unsigned long lastFrameTime = 0;
 const unsigned long FPSdelay = 1000 / 20;
 unsigned int consecutiveTouches = 0;
+Movie *currentMovie = nullptr;
+
+#ifdef BENCHMARK
+unsigned long benchmarkMovieStart = 0;
+Movie balu("/movies/balu", 1151);
+#endif
 
 unsigned int cinema()
 {
-    unsigned int returnDelay = 0;
-    if (!movieRunning)
-    {
-        currentMovie = &movies[random(movies.size())];
-        movieRunning = true;
-        currentFrame = movieFrameStart;
-    }
+  unsigned int returnDelay = 0;
+  if(!movieRunning)
+  {
+#ifdef BENCHMARK
+    currentMovie = &balu;
+#else
+    currentMovie = &movies[random(movies.size())];
+#endif
+    packLoad(currentMovie->path + ".pack");
+    movieRunning = true;
+#ifdef BENCHMARK
+    benchmarkMovieStart = millis();
+#endif
+  }
 
-    if (movieRunning)
-    {
-        std::string jpegFileName = currentMovie->path + "/";
-        // ffmpeg created files with setting %04d.jpg
-        if (currentFrame < 1000)
-            jpegFileName += "0";
-        if (currentFrame < 100)
-            jpegFileName += "0";
-        if (currentFrame < 10)
-            jpegFileName += "0";
-        jpegFileName += std::to_string(currentFrame);
-        jpegFileName += ".jpg";
-        File f = SD.open(jpegFileName.c_str());
-        if (f)
-        {
-            size_t size = f.size();
-            if (size < largestJPEGFileSize)
-            {
-                f.read(jpegBuffer, size);
+  if(movieRunning)
+  {
+    movieRunning = packPlayNextFrame();
 
-                jpeg.openRAM((uint8_t*)jpegBuffer, size, jpegDraw);
-                jpeg.setPixelType(RGB565_BIG_ENDIAN);
-                jpeg.decode(0, 0, 0);
-                jpeg.close();
+    const unsigned long lastFrameDuration = millis() - lastFrameTime;
+    if(lastFrameDuration < FPSdelay)
+      returnDelay = FPSdelay - lastFrameDuration - 1;
+    lastFrameTime = millis();
+  }
 
-                f.close();
+  if(!movieRunning)
+  {
+    packFile.close();
+#ifdef BENCHMARK
+    auto duration = millis() - benchmarkMovieStart;
+    float msf = ((float)duration)/((float)currentMovie->frames);
+    float fps = 1.f / (msf / 1000.f);
+    Serial.printf("movie %s: %d frames in %d ms. %7.4fms/frame, %7.4fFPS\n", currentMovie->path.c_str(), currentMovie->frames, duration, msf, fps);
+#endif
+  }
 
-                const unsigned long lastFrameDuration = millis() - lastFrame;
-                if(lastFrameDuration < FPSdelay)
-                {
-                  lastFrame = millis();
-                  returnDelay = FPSdelay - lastFrameDuration - 1;
-                }
-            }
+#ifdef BENCHMARK
+  return 0;
+#endif
 
-            ++currentFrame;
-
-            if (currentFrame > currentMovie->frames)
-                movieRunning = false;
-        }
-        else
-            movieRunning = false;
-    }
-
-    uint16_t touchX, touchY;
-    if (lcd.getTouch(&touchX, &touchY))
+  TOUCHINFO ti;
+  if (touch.getSamples(&ti)) 
+  {
+    if(ti.count > 0)
     {
       ++consecutiveTouches;
       if (consecutiveTouches > 20) // about 1s touch
@@ -431,14 +431,12 @@ unsigned int cinema()
         movieRunning = false;
       }
     }
-
-    return returnDelay;
+  }
+  return returnDelay;
 }
 
 void loop() {
-
   auto waitForNextFrame = cinema();
   if(waitForNextFrame)
     delay(waitForNextFrame);
-
 }
